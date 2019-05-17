@@ -40,17 +40,22 @@ _std_pixel  = [255 * x for x in (0.229, 0.224, 0.225)]
 
 class HybridTrainPipe(Pipeline):
     def __init__(self, batch_size, num_threads, device_id, rec_path, idx_path,
-                 shard_id, num_shards, crop_shape,
+                 shard_id, num_shards, crop_shape, min_random_aspect_ratio, max_random_aspect_ratio, min_random_area,
                  nvjpeg_padding, prefetch_queue=3,
                  output_layout=types.NCHW, pad_output=True, dtype='float16'):
         super(HybridTrainPipe, self).__init__(batch_size, num_threads, device_id, seed = 12 + device_id, prefetch_queue_depth = prefetch_queue)
         self.input = ops.MXNetReader(path = [rec_path], index_path=[idx_path],
                                      random_shuffle=True, shard_id=shard_id, num_shards=num_shards)
 
-        self.decode = ops.nvJPEGDecoder(device = "mixed", output_type = types.RGB,
-                                        device_memory_padding = nvjpeg_padding,
-                                        host_memory_padding = nvjpeg_padding)
-        self.rrc = ops.RandomResizedCrop(device = "gpu", size = crop_shape)
+        self.decode = ops.nvJPEGDecoderRandomCrop(device = "mixed",
+                                                  output_type = types.RGB,
+                                                  random_aspect_ratio = [min_random_aspect_ratio, max_random_aspect_ratio],
+                                                  random_area = [min_random_area, 1.0],
+                                                  num_attempts = 100)
+
+        self.resize = ops.Resize(device="gpu", resize=crop_shape)
+        # self.resize = ops.Resize(device="gpu", resize_x = 224, resize_y = 224)
+
         self.cmnp = ops.CropMirrorNormalize(device = "gpu",
                                             output_dtype = types.FLOAT16 if dtype == 'float16' else types.FLOAT,
                                             output_layout = output_layout,
@@ -60,6 +65,9 @@ class HybridTrainPipe(Pipeline):
                                             mean = _mean_pixel,
                                             std =  _std_pixel)
         self.coin = ops.CoinFlip(probability = 0.5)
+        
+
+
 
     def define_graph(self):
         rng = self.coin()
@@ -130,6 +138,9 @@ def get_rec_iter(args, kv=None):
                                   shard_id       = gpus.index(gpu_id) + len(gpus)*rank,
                                   num_shards     = len(gpus)*nWrk,
                                   crop_shape     = target_shape[1:],
+                                  max_random_aspect_ratio = args.max_random_aspect_ratio,
+                                  min_random_aspect_ratio = args.min_random_aspect_ratio,
+                                  min_random_area = args.min_random_area,
                                   output_layout  = output_layout,
                                   pad_output     = pad_output,
                                   dtype          = args.dtype,
