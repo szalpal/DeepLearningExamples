@@ -53,8 +53,7 @@ class HybridTrainPipe(Pipeline):
                                                   random_area = [min_random_area, 1.0],
                                                   num_attempts = 100)
 
-        self.resize = ops.Resize(device="gpu", resize=crop_shape)
-        # self.resize = ops.Resize(device="gpu", resize_x = 224, resize_y = 224)
+        self.resize = ops.Resize(device="gpu", resize_x = crop_shape[0], resize_y = crop_shape[1])
 
         self.cmnp = ops.CropMirrorNormalize(device = "gpu",
                                             output_dtype = types.FLOAT16 if dtype == 'float16' else types.FLOAT,
@@ -74,8 +73,9 @@ class HybridTrainPipe(Pipeline):
         self.jpegs, self.labels = self.input(name = "Reader")
 
         images = self.decode(self.jpegs)
-        images = self.rrc(images)
+        images = self.resize(images)
         output = self.cmnp(images, mirror = rng)
+
         return [output, self.labels]
 
 
