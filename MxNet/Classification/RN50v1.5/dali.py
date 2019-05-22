@@ -18,6 +18,7 @@ from nvidia.dali.pipeline import Pipeline
 import nvidia.dali.ops as ops
 import nvidia.dali.types as types
 from nvidia.dali.plugin.mxnet import DALIClassificationIterator
+from mxnet.io import DataBatch, DataIter
 
 
 def add_dali_args(parser):
@@ -102,62 +103,107 @@ class HybridValPipe(Pipeline):
         return [output, self.labels]
 
 
+class SyntheticDataIter(DataIter):
+    def __init__(self, num_classes, data_shape, epoch_size, dtype, gpus, layout):
+        self.batch_size = data_shape[0]
+        self.cur_sample = 0
+        self.epoch_size = epoch_size
+        self.dtype = dtype
+        self.gpus = gpus
+        self._num_gpus = len(gpus)
+        self.data_shape = data_shape
+        self.layout = layout
+        label = np.random.randint(0, num_classes, [self.batch_size,])
+        data = np.random.uniform(-1, 1, data_shape)
+        self.data = [mx.nd.array(data, dtype=self.dtype, ctx=mx.gpu(i)) for i in gpus]
+        self.label = [mx.nd.array(label, dtype=np.float32, ctx=mx.Context('cpu_pinned', 0)) for _ in gpus]
+    def __iter__(self):
+        return self
+    @property
+    def provide_data(self):
+        data_shape  = (self.data_shape[0] * self._num_gpus,) + self.data_shape[1:]
+        return [mx.io.DataDesc('data', data_shape, self.dtype, self.layout)]
+    @property
+    def provide_label(self):
+        label_shape = (self.batch_size * self._num_gpus,)
+        return [mx.io.DataDesc('softmax_label', label_shape, np.float32)]
+    def next(self):
+        if self.cur_sample <= self.epoch_size:
+            self.cur_sample += self.batch_size * self._num_gpus
+            return [DataBatch(data=(d,),
+                              label=(l,),
+                              pad=0)
+                    for d, l in zip(self.data, self.label)]
+        else:
+            raise StopIteration
+    def __next__(self):
+        return self.next()
+    def reset(self):
+        self.cur_sample = 0
+
+
+
 def get_rec_iter(args, kv=None):
     # resize is default base length of shorter edge for dataset;
     # all images will be reshaped to this size
-    resize = int(args.resize)
+    # resize = int(args.resize)
     # target shape is final shape of images pipelined to network;
     # all images will be cropped to this size
     target_shape = tuple([int(l) for l in args.image_shape.split(',')])
-    pad_output = target_shape[0] == 4
+    # pad_output = target_shape[0] == 4
     gpus = list(map(int, filter(None, args.gpus.split(',')))) # filter to not encount eventually empty strings
     batch_size = args.batch_size//len(gpus)
-    num_threads = args.dali_threads
-    num_validation_threads = args.validation_dali_threads
+    # num_threads = args.dali_threads
+    # num_validation_threads = args.validation_dali_threads
     #db_folder = "/data/imagenet/train-480-val-256-recordio/"
 
     # the input_layout w.r.t. the model is the output_layout of the image pipeline
-    output_layout = types.NHWC if args.input_layout == 'NHWC' else types.NCHW
+    # output_layout = types.NHWC if args.input_layout == 'NHWC' else types.NCHW
 
-    rank = kv.rank if kv else 0
-    nWrk = kv.num_workers if kv else 1
+    # rank = kv.rank if kv else 0
+    # nWrk = kv.num_workers if kv else 1
 
-    trainpipes = [HybridTrainPipe(batch_size     = batch_size,
-                                  num_threads    = num_threads,
-                                  device_id      = gpu_id,
-                                  rec_path       = args.data_train,
-                                  idx_path       = args.data_train_idx,
-                                  shard_id       = gpus.index(gpu_id) + len(gpus)*rank,
-                                  num_shards     = len(gpus)*nWrk,
-                                  crop_shape     = target_shape[1:],
-                                  output_layout  = output_layout,
-                                  pad_output     = pad_output,
-                                  dtype          = args.dtype,
-                                  nvjpeg_padding = args.dali_nvjpeg_memory_padding * 1024 * 1024,
-                                  prefetch_queue = args.dali_prefetch_queue) for gpu_id in gpus]
+    # trainpipes = [HybridTrainPipe(batch_size     = batch_size,
+    #                               num_threads    = num_threads,
+    #                               device_id      = gpu_id,
+    #                               rec_path       = args.data_train,
+    #                               idx_path       = args.data_train_idx,
+    #                               shard_id       = gpus.index(gpu_id) + len(gpus)*rank,
+    #                               num_shards     = len(gpus)*nWrk,
+    #                               crop_shape     = target_shape[1:],
+    #                               output_layout  = output_layout,
+    #                               pad_output     = pad_output,
+    #                               dtype          = args.dtype,
+    #                               nvjpeg_padding = args.dali_nvjpeg_memory_padding * 1024 * 1024,
+    #                               prefetch_queue = args.dali_prefetch_queue) for gpu_id in gpus]
 
-    valpipes = [HybridValPipe(batch_size     = batch_size,
-                              num_threads    = num_validation_threads,
-                              device_id      = gpu_id,
-                              rec_path       = args.data_val,
-                              idx_path       = args.data_val_idx,
-                              shard_id       = 0 if args.separ_val
-                                                 else gpus.index(gpu_id) + len(gpus)*rank,
-                              num_shards     = 1 if args.separ_val else len(gpus)*nWrk,
-                              crop_shape     = target_shape[1:],
-                              resize_shp     = resize,
-                              output_layout  = output_layout,
-                              pad_output     = pad_output,
-                              dtype          = args.dtype,
-                              nvjpeg_padding = args.dali_nvjpeg_memory_padding * 1024 * 1024,
-                              prefetch_queue = args.dali_prefetch_queue) for gpu_id in gpus] if args.data_val else None
-    trainpipes[0].build()
-    if args.data_val:
-        valpipes[0].build()
+    # valpipes = [HybridValPipe(batch_size     = batch_size,
+    #                           num_threads    = num_validation_threads,
+    #                           device_id      = gpu_id,
+    #                           rec_path       = args.data_val,
+    #                           idx_path       = args.data_val_idx,
+    #                           shard_id       = 0 if args.separ_val
+    #                                              else gpus.index(gpu_id) + len(gpus)*rank,
+    #                           num_shards     = 1 if args.separ_val else len(gpus)*nWrk,
+    #                           crop_shape     = target_shape[1:],
+    #                           resize_shp     = resize,
+    #                           output_layout  = output_layout,
+    #                           pad_output     = pad_output,
+    #                           dtype          = args.dtype,
+    #                           nvjpeg_padding = args.dali_nvjpeg_memory_padding * 1024 * 1024,
+    #                           prefetch_queue = args.dali_prefetch_queue) for gpu_id in gpus] if args.data_val else None
+    # trainpipes[0].build()
+    # if args.data_val:
+    #     valpipes[0].build()
 
-    if args.num_examples < trainpipes[0].epoch_size("Reader"):
-        warnings.warn("{} training examples will be used, although full training set contains {} examples".format(args.num_examples, trainpipes[0].epoch_size("Reader")))
-    dali_train_iter = DALIClassificationIterator(trainpipes, args.num_examples // nWrk)
-    dali_val_iter = DALIClassificationIterator(valpipes, valpipes[0].epoch_size("Reader") // (1 if args.separ_val else nWrk), fill_last_batch = False) if args.data_val else None
-    return dali_train_iter, dali_val_iter
+    # if args.num_examples < trainpipes[0].epoch_size("Reader"):
+    #     warnings.warn("{} training examples will be used, although full training set contains {} examples".format(args.num_examples, trainpipes[0].epoch_size("Reader")))
+    # dali_train_iter = DALIClassificationIterator(trainpipes, args.num_examples // nWrk)
+    # dali_val_iter = DALIClassificationIterator(valpipes, valpipes[0].epoch_size("Reader") // (1 if args.separ_val else nWrk), fill_last_batch = False) if args.data_val else None
+
+    print("Using synthetic data")
+    data_shape = (batch_size,) + target_shape
+    train = SyntheticDataIter(1000, data_shape,
+                              args.num_examples, args.dtype, gpus, args.input_layout)
+    return (train, None)
 
